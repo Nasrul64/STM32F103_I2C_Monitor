@@ -64,7 +64,22 @@ USBD_HandleTypeDef hUsbDeviceFS;
 void MX_USB_DEVICE_Init(void)
 {
   /* USER CODE BEGIN USB_DEVICE_Init_PreTreatment */
-
+	// Nasrul 20221124 - Begin
+	/*
+	 * Taken from: https://github.com/philrawlings/bluepill-usb-cdc-test
+	 * This forces the host to re-enumerate the device when the MCU is reset,
+	 * as it is akin to unplugging the USB cable and plugging it back in.
+	 * Only needed if there is a pullup resistor on the USB_DP line - as is the case with the BluePill
+	 */
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	GPIO_InitStruct.Pin = GPIO_PIN_12;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+	HAL_Delay(500); // Nasrul 20221124 - Was 100ms which already enough, but I changed to 500ms to just to be really sure
+	// Nasrul 20221124 - End
   /* USER CODE END USB_DEVICE_Init_PreTreatment */
 
   /* Init Device Library, add supported class and start the library. */

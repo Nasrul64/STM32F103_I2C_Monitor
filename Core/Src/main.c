@@ -23,7 +23,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include "usbd_cdc_if.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,23 +34,29 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define RAW_I2C_BUFFER_SIZE 7000 // size in bytes (1 byte = 1 received I2C bit or START/STOP condition)
+#define USB_TX_BUFFER_SIZE 256
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define USB_TX(A) strcpy(szUSBTxBuf, A); CDC_Transmit_FS((uint8_t*)szUSBTxBuf, (uint16_t) strlen(szUSBTxBuf)); HAL_Delay(1);
+#define USB_TX_V(A,B) sprintf(szUSBTxBuf, A, B); CDC_Transmit_FS((uint8_t*)szUSBTxBuf, (uint16_t) strlen(szUSBTxBuf)); HAL_Delay(1);
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+char szUSBTxBuf[USB_TX_BUFFER_SIZE];
+uint8_t rawI2CBuf[RAW_I2C_BUFFER_SIZE];
+uint16_t rawI2CBufIdx = 0;   // the current writing position inside the buffer
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+void processAndTxData();
+void setLED(uint8_t bOn);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -87,13 +94,59 @@ int main(void)
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+  for(int i=0;i<3;i++)
+  {
+	  HAL_Delay(250); setLED(1);
+	  HAL_Delay(250); setLED(0);
+  }
+
+  USB_TX("I2C Monitor Started\r\n")
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
+    {
+  	  if(CDC_GetRxBufferBytesAvailable_FS())
+  	  {
+  			uint8_t rxBuf[10];
+  			uint8_t ret = CDC_ReadRxBuffer_FS(rxBuf, 1);
+
+  			if(ret==USB_CDC_RX_BUFFER_OK)
+  			{
+  				setLED(1);
+  				switch(rxBuf[0])
+  				{
+  					case '?':
+  						USB_TX("Commands: H=Hello, F=Fetch, C=Clear\r\n")
+  						break;
+  					case 'h':
+  					case 'H':
+  						USB_TX("HelloWorld\r\n")
+  						for(int i=0;i<3;i++)
+  						  {
+  							  HAL_Delay(250); setLED(1);
+  							  HAL_Delay(250); setLED(0);
+  						  }
+  						break;
+  					case 'f':
+  					case 'F':
+  						USB_TX("\r\nTransfer Begin\r\n")
+  						processAndTxData();
+  						rawI2CBufIdx = 0;
+  						USB_TX("\r\nTransfer End\r\n")
+  						break;
+  					case 'c':
+  					case 'C':
+  						rawI2CBufIdx = 0;
+  						break;
+  				}
+  				setLED(0);
+  			}
+
+  			CDC_FlushRxBuffer_FS();
+  	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -149,6 +202,210 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+enum StateType
+{
+	stStart=0,
+	stRptStart,
+	stAddress,
+	stRW,
+	stAckNack,
+	stData,
+	stStop,
+	stError,
+};
+
+void processAndTxData()
+{
+	uint8_t curDatum;
+	uint8_t curBufIdx=0;
+	enum StateType nState = stStart;
+	uint8_t nDataToReadLeft = 0;
+	uint8_t bAbort = 0;
+	uint8_t bTempByte;
+	uint8_t bShift;
+
+	while ((curBufIdx <= rawI2CBufIdx) && !bAbort)
+	{
+		setLED(curBufIdx&0x1); //Toggle LED
+
+		curDatum = rawI2CBuf[curBufIdx];
+
+		bShift = 1;
+
+		switch(nState)
+		{
+		case stStart:
+		case stRptStart:
+			if(curDatum=='B')
+			{
+				if(nState==stStart)
+				{
+					USB_TX("s ")
+				}
+				else // stRptStart
+				{
+					USB_TX("z ")
+				}
+
+				bTempByte = 0x0;
+				nDataToReadLeft = 7;
+				nState = stAddress;
+			}
+			break;
+		case stAddress:
+			if(curDatum=='H')
+			{
+				bTempByte |= 0x1<<(nDataToReadLeft-1);
+			}
+			else if(curDatum=='L')
+			{
+				// Do nothing
+			}
+			else
+			{
+				bShift = 0;
+				nState = stError;
+				break;
+			}
+
+			nDataToReadLeft -= 1;
+
+			if(nDataToReadLeft==0)
+			{
+				USB_TX_V("0x%02X", bTempByte)
+				nState = stRW;
+			}
+			break;
+		case stRW:
+			if(curDatum=='H')
+			{
+				USB_TX("r ")
+			}
+			else if(curDatum=='L')
+			{
+				USB_TX("w ")
+			}
+			else
+			{
+				bShift = 0;
+				nState = stError;
+				break;
+			}
+
+			nState = stAckNack;
+			break;
+		case stAckNack:
+			if(curDatum=='H')
+			{
+				USB_TX("n ")
+				nState = stStop;
+			}
+			else if(curDatum=='L')
+			{
+				USB_TX("a ")
+
+				bTempByte = 0x0;
+				nDataToReadLeft = 8;
+				nState = stData;
+			}
+			else
+			{
+				bShift = 0;
+				nState = stError;
+				break;
+			}
+			break;
+		case stData:
+			if(curDatum=='H')
+			{
+				bTempByte |= 0x1<<(nDataToReadLeft-1);
+			}
+			else if(curDatum=='L')
+			{
+				// Do nothing
+			}
+			else if(curDatum=='B')
+			{
+				bShift = 0;
+				nState = stRptStart;
+			}
+			else if(curDatum=='E')
+			{
+				bShift = 0;
+				nState = stStop;
+			}
+			else
+			{
+				bShift = 0;
+				nState = stError;
+				break;
+			}
+
+			nDataToReadLeft -= 1;
+
+			if(nDataToReadLeft==0)
+			{
+				USB_TX_V("0x%02X ", bTempByte)
+				nState = stAckNack;
+			}
+			break;
+		case stStop:
+			if(curDatum=='E')
+			{
+				USB_TX("p\r\n")
+
+				nState = stStart;
+			}
+			else
+			{
+				// Do nothing until stop received
+			}
+			break;
+		case stError:
+			USB_TX_V("X:%c\r\n", curDatum)
+			nState = stStart;
+			break;
+		}
+
+		if(bShift)
+		{
+			curBufIdx += 1; // Shift Index
+		}
+	}
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if (rawI2CBufIdx < RAW_I2C_BUFFER_SIZE)
+	{
+		if(GPIO_Pin==SDA_SENS_Pin)
+		{
+			if(HAL_GPIO_ReadPin(SCL_SENS_GPIO_Port, SCL_SENS_Pin)) // Start & Stop can only happen during SCL is HIGH
+			{
+				rawI2CBuf[rawI2CBufIdx] = HAL_GPIO_ReadPin(SDA_SENS_GPIO_Port, SDA_SENS_Pin)?'E':'B'; // B=Start, E=Stop
+			}
+			else
+			{
+				return;
+			}
+		}
+		else if(GPIO_Pin==SCL_SENS_Pin)
+		{
+			rawI2CBuf[rawI2CBufIdx] = HAL_GPIO_ReadPin(SDA_SENS_GPIO_Port, SDA_SENS_Pin)?'H':'L'; // H=High, L=Low
+		}
+		else
+		{
+			return;
+		}
+
+		rawI2CBufIdx += 1;
+	}
+}
+
+void setLED(uint8_t bOn)
+{
+	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, bOn? GPIO_PIN_RESET:GPIO_PIN_SET);
+}
 /* USER CODE END 4 */
 
 /**
